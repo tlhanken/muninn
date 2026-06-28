@@ -1,0 +1,5 @@
+name: qmd-wiki
+description: "Memory provider backed by .qmd/.md wiki files. Reads from Obsidian vault or custom wiki directory. Supports executable code cells for living knowledge verification."
+version: 0.1.0
+author: Hermes Agent
+license: MIT
