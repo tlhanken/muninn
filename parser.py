@@ -1,4 +1,4 @@
-"""QMD Wiki parser — extract frontmatter, content, and code cells from .qmd/.md files.
+"""QMD Wiki parser — extract frontmatter, content, code cells, and wikilinks from .qmd/.md files.
 
 Pure stdlib, no external dependencies. Works on NixOS.
 """
@@ -9,6 +9,8 @@ import re
 import os
 import subprocess
 import tempfile
+import textwrap
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
@@ -34,17 +36,33 @@ class WikiPage:
     code_cells: List[CodeCell] = field(default_factory=list)
     raw: str = ""  # full file content
 
+    # OKF metadata (from frontmatter)
+    page_type: Optional[str] = None  # frontmatter "type" field
+    confidence: str = "medium"  # "high", "medium", "low" (default medium)
+    status: str = "active"  # "active", "superseded", "rejected" (default active)
+
+    # Wikilinks extracted from markdown body
+    wikilinks: List[str] = field(default_factory=list)
+
+    # Summary: from frontmatter or auto-extracted from first paragraph
+    summary: str = ""
+
+    # Which wiki_dir this page was indexed from (set by _rebuild_index)
+    source_dir: str = ""
+
     @property
     def has_executable_code(self) -> bool:
         return any(c.language in ("python", "r", "bash", "sh") for c in self.code_cells)
 
     @property
     def search_text(self) -> str:
-        """Flat text for search indexing — title, tags, markdown, code outputs."""
-        parts = [self.title] + self.tags + [self.markdown]
+        """Flat text for search indexing — title, tags, summary, markdown, code outputs, wikilinks."""
+        parts = [self.title] + self.tags + [self.summary, self.markdown]
         for cell in self.code_cells:
             if cell.output:
                 parts.append(cell.output)
+        # Include wikilink targets in search text so [[link]] targets are searchable
+        parts.extend(self.wikilinks)
         return " ".join(parts)
 
 
@@ -52,7 +70,7 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
     """Extract YAML frontmatter and return (metadata, body).
 
     Uses simple line-based parsing — no yaml dependency needed for basic
-    title/tags/last_verified fields.
+    title/tags/last_verified/type/confidence/status fields.
     """
     if not content.startswith("---"):
         return {}, content
@@ -95,6 +113,27 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
             metadata[key] = value
 
     return metadata, body
+
+
+def extract_wikilinks(text: str) -> List[str]:
+    """Extract [[wikilink]] targets from markdown text.
+
+    Supports:
+      [[Page Name]]           → "Page Name"
+      [[page-name]]           → "page-name"
+      [[alias|display text]]  → "page-name" (alias is the target)
+    Returns de-duplicated list preserving order.
+    """
+    links = re.findall(r'\[\[([^\]]+)\]\]', text)
+    seen = set()
+    result = []
+    for link in links:
+        # Handle alias syntax: [[target|display text]]
+        target = link.split("|")[0].strip() if "|" in link else link.strip()
+        if target and target not in seen:
+            seen.add(target)
+            result.append(target)
+    return result
 
 
 def extract_code_cells(body: str) -> Tuple[str, List[CodeCell]]:
@@ -157,6 +196,7 @@ def execute_code_cell(cell: CodeCell, timeout: int = 10) -> None:
         cell.output = f"[execution not supported for {cell.language}]"
         return
 
+    temp_path = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(cell.source)
@@ -169,8 +209,6 @@ def execute_code_cell(cell: CodeCell, timeout: int = 10) -> None:
             text=True,
             timeout=timeout,
         )
-
-        os.unlink(temp_path)
 
         if result.returncode == 0:
             cell.output = result.stdout.strip() if result.stdout.strip() else "[no output]"
@@ -185,10 +223,38 @@ def execute_code_cell(cell: CodeCell, timeout: int = 10) -> None:
         cell.output = None
         cell.error = f"[execution error: {e}]"
     finally:
-        try:
-            os.unlink(temp_path)
-        except Exception:
-            pass
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+
+def _auto_summary(markdown: str, max_chars: int = 200) -> str:
+    """Auto-generate a summary from the first meaningful paragraph of markdown.
+
+    Skips headings, code cell placeholders, and empty lines.
+    Truncates to max_chars at the nearest word boundary.
+    """
+    lines = markdown.strip().split("\n")
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip headings
+        if stripped.startswith("#"):
+            continue
+        # Skip code cell placeholders
+        if stripped.startswith("[code cell:"):
+            continue
+        # Skip horizontal rules
+        if stripped == "---" or stripped == "***":
+            continue
+        # Found first meaningful paragraph
+        # Clean up wikilink syntax for readability
+        text = re.sub(r'\[\[([^\]|]+)(\|[^\]]+)?\]\]', r'\1', stripped)
+        return textwrap.shorten(text, width=max_chars, placeholder="...") if len(text) > max_chars else text
+    return ""
 
 
 def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:
@@ -204,6 +270,24 @@ def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:
     metadata, body = parse_frontmatter(content)
     markdown, code_cells = extract_code_cells(body)
 
+    # Extract OKF metadata from frontmatter
+    page_type = metadata.get("type")
+    confidence = metadata.get("confidence", "medium")
+    if confidence not in ("high", "medium", "low"):
+        confidence = "medium"
+
+    status = metadata.get("status", "active")
+    if status not in ("active", "superseded", "rejected", "candidate"):
+        status = "active"
+
+    # Extract wikilinks from the markdown body
+    wikilinks = extract_wikilinks(markdown)
+
+    # Extract summary: from frontmatter or auto-generate from first paragraph
+    summary = metadata.get("summary", "")
+    if not summary:
+        summary = _auto_summary(markdown)
+
     page = WikiPage(
         path=path,
         title=metadata.get("title", path.split("/")[-1].replace(".qmd", "").replace(".md", "")),
@@ -212,6 +296,11 @@ def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:
         markdown=markdown.strip(),
         code_cells=code_cells,
         raw=content,
+        page_type=page_type,
+        confidence=confidence,
+        status=status,
+        wikilinks=wikilinks,
+        summary=summary,
     )
 
     if execute_cells:
@@ -222,15 +311,188 @@ def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:
     return page
 
 
+def slugify(title: str) -> str:
+    """Convert a title to a SCHEMA-compliant filename (without extension).
+
+    Rules: lowercase, spaces → hyphens, strip non-alphanumeric except hyphens,
+    collapse consecutive hyphens, max 80 chars, no leading/trailing hyphens.
+    """
+    s = title.lower().strip()
+    s = re.sub(r'[/\\._]', ' ', s)      # separators → spaces (before strip)
+    s = re.sub(r'[^a-z0-9\s-]', '', s)  # strip non-alphanumeric (keep spaces, hyphens)
+    s = re.sub(r'[\s]+', '-', s)         # spaces → hyphens
+    s = re.sub(r'-+', '-', s)            # collapse consecutive hyphens
+    s = s.strip('-')                      # no leading/trailing hyphens
+    if len(s) > 80:
+        s = s[:80].rsplit('-', 1)[0]     # cut at word boundary near 80 chars
+    return s or 'untitled'
+
+
+def generate_frontmatter(
+    title: str,
+    tags: Optional[List[str]] = None,
+    page_type: Optional[str] = None,
+    confidence: str = "medium",
+    status: str = "active",
+    created: Optional[str] = None,
+    updated: Optional[str] = None,
+    extra_fields: Optional[dict] = None,
+) -> str:
+    """Generate YAML frontmatter string for a wiki page.
+
+    Returns the frontmatter block including opening/closing --- delimiters.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if created is None:
+        created = now
+    if updated is None:
+        updated = now
+
+    lines = ["---"]
+    lines.append(f'title: "{title}"')
+    if tags:
+        lines.append(f'tags: [{", ".join(tags)}]')
+    if page_type:
+        lines.append(f'type: {page_type}')
+    lines.append(f'confidence: {confidence}')
+    lines.append(f'status: {status}')
+    lines.append(f'created: {created}')
+    lines.append(f'updated: {updated}')
+    if extra_fields:
+        for k, v in extra_fields.items():
+            lines.append(f'{k}: {v}')
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def write_wiki_file(
+    path: str,
+    title: str,
+    content: str,
+    tags: Optional[List[str]] = None,
+    page_type: Optional[str] = None,
+    confidence: str = "medium",
+    status: str = "active",
+) -> dict:
+    """Write a wiki page to disk with auto-generated frontmatter.
+
+    If the file already exists, preserve the created date and merge tags.
+    Returns a dict with metadata about the write operation.
+    """
+    tags = tags or []
+    created = None
+    action = "created"
+
+    if os.path.exists(path):
+        # Read existing file to preserve created date and merge tags
+        with open(path, "r", encoding="utf-8") as f:
+            existing = f.read()
+        existing_meta, _ = parse_frontmatter(existing)
+        created = existing_meta.get("created")
+        # Merge tags: existing tags first, then new tags (deduped, order-preserved)
+        existing_tags = existing_meta.get("tags", [])
+        if isinstance(existing_tags, list):
+            merged = list(existing_tags)
+            for t in tags:
+                if t not in merged:
+                    merged.append(t)
+            tags = merged
+        action = "updated"
+
+    fm = generate_frontmatter(
+        title=title,
+        tags=tags,
+        page_type=page_type,
+        confidence=confidence,
+        status=status,
+        created=created,
+    )
+
+    # Ensure parent directory exists
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    file_content = f"{fm}\n\n{content}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(file_content)
+
+    # Extract wikilinks from the content for reporting
+    wikilinks = extract_wikilinks(content)
+
+    return {
+        "action": action,
+        "path": path,
+        "title": title,
+        "tags": tags,
+        "wikilinks": wikilinks,
+    }
+
+
+def append_to_wiki_file(path: str, content: str, section: Optional[str] = None) -> str:
+    """Append content to an existing wiki page.
+
+    If section is provided, inserts content under a new ## section header.
+    Updates the 'updated' field in frontmatter.
+    Returns the new full file content.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        file_content = f.read()
+
+    meta, body = parse_frontmatter(file_content)
+
+    # Build the append block
+    if section:
+        append_block = f"\n\n## {section}\n\n{content}\n"
+    else:
+        append_block = f"\n\n{content}\n"
+
+    new_body = body.rstrip() + append_block
+
+    # Regenerate frontmatter with bumped updated date
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tags = meta.get("tags", [])
+    if isinstance(tags, str):
+        tags = [tags]
+
+    fm = generate_frontmatter(
+        title=meta.get("title", os.path.basename(path).replace(".md", "")),
+        tags=tags,
+        page_type=meta.get("type"),
+        confidence=meta.get("confidence", "medium"),
+        status=meta.get("status", "active"),
+        created=meta.get("created"),
+        updated=now,
+        extra_fields={
+            k: v for k, v in meta.items()
+            if k not in ("title", "tags", "type", "confidence", "status", "created", "updated")
+            and v
+        },
+    )
+
+    new_content = f"{fm}\n\n{new_body}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    return new_content
+
+
 def format_page_for_context(page: WikiPage, max_chars: int = 3000) -> str:
     """Format a wiki page for injection into session context."""
     lines = []
     lines.append(f"### {page.title}")
     if page.tags:
         lines.append(f"Tags: {', '.join(page.tags)}")
+    if page.page_type:
+        lines.append(f"Type: {page.page_type}")
+    if page.confidence != "medium":
+        lines.append(f"Confidence: {page.confidence}")
     if page.last_verified:
         lines.append(f"Last verified: {page.last_verified}")
     lines.append("")
+
+    # Show summary if present (before markdown body)
+    if page.summary:
+        lines.append(f"> {page.summary}")
+        lines.append("")
 
     # Truncate markdown if too long
     md = page.markdown
@@ -244,5 +506,9 @@ def format_page_for_context(page: WikiPage, max_chars: int = 3000) -> str:
             lines.append(f"\n```\n{cell.output}\n```")
         elif cell.error:
             lines.append(f"\n[execution error: {cell.error}]")
+
+    # Include wikilinks if present
+    if page.wikilinks:
+        lines.append(f"\nLinks: {', '.join(f'[[{w}]]' for w in page.wikilinks)}")
 
     return "\n".join(lines)
