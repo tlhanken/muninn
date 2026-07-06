@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import subprocess
+import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,12 +65,12 @@ except Exception:
         pass
 
 
-# QMD binary path (not in global PATH — built locally)
-_QMD_BIN = os.path.expanduser("~/workspace/tools/qmd/bin/qmd")
+# QMD binary — provided by Nix package (nix/packages/qmd.nix)
+_QMD_BIN = shutil.which("qmd") or "qmd"
 
 # Default wiki directories to check (first existing wins, used when no config)
 _DEFAULT_WIKI_DIRS = [
-    os.path.expanduser("~/SynologyDrive/Obsidian Vault (Restructured)/04 - AI/Wiki"),
+    os.path.expanduser("~/SynologyDrive/Obsidian Vault/04 - AI/Wiki"),
     os.path.expanduser("~/.hermes/wiki"),
 ]
 
@@ -244,6 +245,7 @@ class QMDWikiMemoryProvider(MemoryProvider):
         self._lock = threading.Lock()
         self._session_id: str = ""
         self._prefetch_cache: str = ""
+        self._current_session_path: Optional[str] = None
 
     # -- Core identity --------------------------------------------------------
 
@@ -588,7 +590,8 @@ class QMDWikiMemoryProvider(MemoryProvider):
         """Write a session log entry to Episodic/sessions/.
 
         Writes full user and assistant content (no truncation).
-        Caps at 200 entries per file — oldest 25 stripped when exceeded.
+        Each turn produces two entries: one for User, one for Assistant.
+        Caps at 200 entries per file (~100 turns) — oldest 25 stripped when exceeded.
         Tags each session file with the agent profile name.
         """
         # Find Episodic/ in wiki_dirs
@@ -615,17 +618,20 @@ class QMDWikiMemoryProvider(MemoryProvider):
         session_path = os.path.join(sessions_dir, f"{session_slug}.md")
         timestamp = now.strftime("%Y-%m-%d %H:%M UTC")
 
+        # Track session path for on_session_end hook
+        if self._current_session_path is None:
+            self._current_session_path = session_path
+
         # Detect agent profile name from hermes_home path
         agent_name = self._detect_profile_name()
 
-        # Format full content entry (preserve multi-line)
+        # Format as two separate ### entries (Option 2: one per speaker)
         # Break triple backticks to avoid nesting in markdown
         user_clean = user_content.replace("```", "`\u200b`\u200b`")
         asst_clean = assistant_content.replace("```", "`\u200b`\u200b`")
-        entry = (
-            f"### {timestamp}\n\n"
-            f"**User:**\n\n{user_clean}\n\n"
-            f"**Assistant:**\n\n{asst_clean}\n\n"
+        entries = (
+            f"### {timestamp} | User\n\n{user_clean}\n\n"
+            f"### {timestamp} | Assistant\n\n{asst_clean}\n\n"
         )
 
         if not os.path.exists(session_path):
@@ -634,7 +640,7 @@ class QMDWikiMemoryProvider(MemoryProvider):
             write_wiki_file(
                 path=session_path,
                 title=f"Session {now.strftime('%Y-%m-%d')}",
-                content=entry,
+                content=entries,
                 tags=tags,
                 page_type="episodic",
                 confidence="medium",
@@ -671,8 +677,8 @@ class QMDWikiMemoryProvider(MemoryProvider):
                 strip_index = entry_matches[24].start() if len(entry_matches) > 24 else 0
                 body = body[strip_index:]
 
-            # Append new entry
-            new_body = body.rstrip() + "\n\n" + entry
+            # Append new entries
+            new_body = body.rstrip() + "\n\n" + entries
 
             if frontmatter_block:
                 full_content = frontmatter_block + "\n" + new_body
@@ -684,7 +690,93 @@ class QMDWikiMemoryProvider(MemoryProvider):
         except Exception as e:
             logger.warning("QMD Wiki: failed to append session turn: %s", e)
             # Fallback: use append_to_wiki_file
-            append_to_wiki_file(session_path, entry)
+            append_to_wiki_file(session_path, entries)
+
+    # -- Session end hook ----------------------------------------------------
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Extract summary from the closeout message and inject into frontmatter.
+
+        Called when a session ends (CLI exit, /reset, gateway expiry).
+        Takes the last assistant message, extracts a one-line summary,
+        and injects a ``summary:`` field into the session file frontmatter.
+        """
+        if not self._current_session_path:
+            return
+        if not os.path.exists(self._current_session_path):
+            return
+
+        # Find the last substantive assistant message
+        last_content: Optional[str] = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), str):
+                content = msg["content"].strip()
+                if content and content != "(empty)":
+                    last_content = content
+                    break
+
+        if not last_content:
+            return
+
+        summary = self._extract_summary(last_content)
+        if not summary or len(summary) < 3:
+            return
+
+        try:
+            self._inject_frontmatter_field(
+                self._current_session_path, "summary", summary, yaml_safe=True
+            )
+        except Exception as e:
+            logger.debug("QMD Wiki: on_session_end failed: %s", e)
+
+    def _get_session_path(self) -> Optional[str]:
+        """Return the tracked session file path, if one exists."""
+        return self._current_session_path
+
+    def _extract_summary(self, text: str) -> str:
+        """Extract a one-line summary from assistant response text.
+
+        Strips markdown formatting, takes the first meaningful sentence.
+        Caps at 200 chars at a word boundary.
+        """
+        # Strip fenced code blocks
+        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        # Strip inline code — keep the inner text
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        # Strip bold/italic markers (preserve inner text)
+        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+        text = re.sub(r"\*([^*]+)\*", r"\1", text)
+
+        lines = text.strip().split("\n")
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Skip separator lines
+            if re.match(r"^[-_*=]{3,}$", line):
+                continue
+            # Skip heading markers
+            if line.startswith("#"):
+                continue
+            # Skip list items (details, not summary)
+            if line.startswith("- ") or line.startswith("* "):
+                continue
+            # Take first sentence
+            sentences = re.split(r"(?<=[.!?])\s+", line)
+            summary = sentences[0].strip().strip("`\"'")
+            if not summary:
+                continue
+            if len(summary) > 200:
+                summary = summary[:197].rsplit(" ", 1)[0] + "..."
+            return summary
+
+        # Fallback: first non-empty line
+        for line in lines:
+            line = line.strip()
+            if line:
+                line = line.strip("`\"'")
+                return line[:197] + "..." if len(line) > 200 else line
+        return ""
 
     def _detect_profile_name(self) -> str:
         """Detect the current Hermes profile name from hermes_home path.
@@ -702,11 +794,14 @@ class QMDWikiMemoryProvider(MemoryProvider):
             pass
         return "default"
 
-    def _inject_frontmatter_field(self, file_path: str, field: str, value: str) -> None:
+    def _inject_frontmatter_field(self, file_path: str, field: str, value: str, yaml_safe: bool = False) -> None:
         """Inject a field into the YAML frontmatter of a markdown file.
 
         Opens the file, finds the frontmatter block, inserts the field
         after the 'tags:' line (or at the end of frontmatter), and rewrites.
+
+        When yaml_safe=True, the value is wrapped in double quotes with
+        internal quote escaping to prevent YAML parse errors.
         """
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -728,11 +823,18 @@ class QMDWikiMemoryProvider(MemoryProvider):
             elif line.strip().startswith("status:"):
                 insert_after = i
 
+        if yaml_safe:
+            # Escape internal double quotes and wrap in quotes for YAML safety
+            safe_val = value.replace('"', '\\"')
+            field_line = f'{field}: "{safe_val}"'
+        else:
+            field_line = f"{field}: {value}"
+
         if insert_after >= 0:
-            lines.insert(insert_after + 1, f"{field}: {value}")
+            lines.insert(insert_after + 1, field_line)
         else:
             # Insert before the last line (---)
-            lines.insert(-1, f"{field}: {value}")
+            lines.insert(-1, field_line)
 
         new_fm = "\n".join(lines)
         new_content = f"---{new_fm}---{body}"
@@ -840,7 +942,7 @@ class QMDWikiMemoryProvider(MemoryProvider):
                 qmd_results = json.loads(result.stdout) if result.stdout else []
                 qmd_paths = [r.get("file", "") for r in qmd_results if isinstance(r, dict) and r.get("file")]
             except Exception as e:
-                logger.debug("QMD Wiki: hybrid query failed: %s", e)
+                logger.error("QMD Wiki: search failed — qmd CLI returned: %s", e)
                 return []
 
         # Map QMD file paths to our WikiPage objects (absolute path matching)
