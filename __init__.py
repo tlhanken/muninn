@@ -84,6 +84,13 @@ _CONFIDENCE_WEIGHTS = {
     "low": 0.7,
 }
 
+# Known OKF page types for schema validation on write
+_OKF_TYPES = {
+    "concept", "entity", "comparison", "query", "summary",
+    "decision", "episodic", "procedural", "executive",
+    "identity", "user", "dream-candidate", "note",
+}
+
 # Tool schemas
 WIKI_SEARCH_SCHEMA = {
     "name": "wiki_search",
@@ -1123,6 +1130,18 @@ class QMDWikiMemoryProvider(MemoryProvider):
         if confidence is not None and confidence not in ("high", "medium", "low"):
             confidence = "medium"
         directory = args.get("directory")
+
+        # Schema validation: page_type must be a known OKF type.
+        # This is the programmatic guard that makes the write API generate
+        # schema-conformant files — reject early, write nothing on failure.
+        if page_type is not None and page_type not in _OKF_TYPES:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    f"type '{page_type}' is not a known OKF type. "
+                    f"Allowed: {sorted(_OKF_TYPES)}"
+                ),
+            })
 
         # Resolve write directory
         write_dir = self._resolve_write_dir(directory)
