@@ -1188,6 +1188,11 @@ class QMDWikiMemoryProvider(MemoryProvider):
         # Reflect the change in our catalog
         self._catalog_update(file_path)
 
+        # Incremental QMD reindex so the write is immediately searchable.
+        # qmd update only reprocesses changed files (mtime/hash), so this is
+        # cheap per-write — no full reindex required.
+        self._index_changed()
+
         return json.dumps({
             "success": True,
             "action": result["action"],
@@ -1197,6 +1202,18 @@ class QMDWikiMemoryProvider(MemoryProvider):
             "wikilinks": result["wikilinks"],
             "message": f"Page {'created' if result['action'] == 'created' else 'updated'}: {title}",
         })
+
+    def _index_changed(self) -> None:
+        """Trigger an incremental QMD reindex after a write/append.
+
+        qmd update is incremental (only changed files are reprocessed), so this
+        keeps a freshly-written page searchable in the current session without
+        forcing the full reindex that wiki_refresh performs.
+        """
+        try:
+            self._run_qmd("update")
+        except Exception as e:
+            logger.debug("QMD Wiki: incremental index update failed: %s", e)
 
     def _handle_wiki_append(self, args: Dict[str, Any]) -> str:
         """Handle wiki_append tool call — append to an existing wiki page."""
@@ -1217,6 +1234,10 @@ class QMDWikiMemoryProvider(MemoryProvider):
 
         # Reflect the change in our catalog
         self._catalog_update(page.path)
+
+        # Incremental QMD reindex so the appended content is immediately
+        # searchable (qmd update only reprocesses changed files).
+        self._index_changed()
 
         return json.dumps({
             "success": True,
