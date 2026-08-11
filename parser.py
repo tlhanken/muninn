@@ -230,31 +230,75 @@ def execute_code_cell(cell: CodeCell, timeout: int = 10) -> None:
                 pass
 
 
+def _strip_markdown_noise(text: str) -> str:
+    """Strip common markdown formatting, preserving inner text.
+
+    Removes fenced code blocks, inline code (keeping inner text), and
+    bold/italic markers. Used by summary extraction.
+    """
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    return text
+
+
+def extract_summary(
+    text: str,
+    max_chars: int = 200,
+    mode: str = "paragraph",
+) -> str:
+    """Extract a summary from markdown text.
+
+    Modes:
+      "paragraph" — first meaningful paragraph (page catalog summaries).
+      "sentence"  — first meaningful sentence of the first meaningful line
+                    (session closeout summaries).
+
+    Shared logic (both modes): strip markdown noise, skip headings, list
+    items, separators, and empty lines; clean wikilink syntax.
+    """
+    cleaned = _strip_markdown_noise(text)
+
+    def _cleaned_line(line: str) -> Optional[str]:
+        line = line.strip()
+        if not line:
+            return None
+        if line.startswith("#"):
+            return None
+        if line.startswith("[code cell:"):
+            return None
+        if line == "---" or line == "***":
+            return None
+        if mode == "sentence" and (line.startswith("- ") or line.startswith("* ")):
+            return None
+        # Clean wikilink syntax for readability
+        return re.sub(r"\[\[([^\]|]+)(\|[^\]]+)?\]\]", r"\1", line)
+
+    for line in cleaned.split("\n"):
+        line = _cleaned_line(line)
+        if not line:
+            continue
+        if mode == "sentence":
+            sentence = re.split(r"(?<=[.!?])\s+", line)[0].strip().strip("`\"'")
+            if not sentence:
+                continue
+            return textwrap.shorten(
+                sentence, width=max_chars, placeholder="..."
+            ) if len(sentence) > max_chars else sentence
+        # paragraph mode
+        return textwrap.shorten(
+            line, width=max_chars, placeholder="..."
+        ) if len(line) > max_chars else line
+    return ""
+
+
 def _auto_summary(markdown: str, max_chars: int = 200) -> str:
     """Auto-generate a summary from the first meaningful paragraph of markdown.
 
-    Skips headings, code cell placeholders, and empty lines.
-    Truncates to max_chars at the nearest word boundary.
+    Thin wrapper over the shared ``extract_summary`` (paragraph mode).
     """
-    lines = markdown.strip().split("\n")
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Skip headings
-        if stripped.startswith("#"):
-            continue
-        # Skip code cell placeholders
-        if stripped.startswith("[code cell:"):
-            continue
-        # Skip horizontal rules
-        if stripped == "---" or stripped == "***":
-            continue
-        # Found first meaningful paragraph
-        # Clean up wikilink syntax for readability
-        text = re.sub(r'\[\[([^\]|]+)(\|[^\]]+)?\]\]', r'\1', stripped)
-        return textwrap.shorten(text, width=max_chars, placeholder="...") if len(text) > max_chars else text
-    return ""
+    return extract_summary(markdown, max_chars=max_chars, mode="paragraph")
 
 
 def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:

@@ -736,47 +736,11 @@ class QMDWikiMemoryProvider(MemoryProvider):
     def _extract_summary(self, text: str) -> str:
         """Extract a one-line summary from assistant response text.
 
-        Strips markdown formatting, takes the first meaningful sentence.
-        Caps at 200 chars at a word boundary.
+        Delegates to the shared ``extract_summary`` (sentence mode) in
+        parser.py — strips markdown noise and takes the first meaningful
+        sentence, capped at 200 chars at a word boundary.
         """
-        # Strip fenced code blocks
-        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-        # Strip inline code — keep the inner text
-        text = re.sub(r"`([^`]+)`", r"\1", text)
-        # Strip bold/italic markers (preserve inner text)
-        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-        text = re.sub(r"\*([^*]+)\*", r"\1", text)
-
-        lines = text.strip().split("\n")
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # Skip separator lines
-            if re.match(r"^[-_*=]{3,}$", line):
-                continue
-            # Skip heading markers
-            if line.startswith("#"):
-                continue
-            # Skip list items (details, not summary)
-            if line.startswith("- ") or line.startswith("* "):
-                continue
-            # Take first sentence
-            sentences = re.split(r"(?<=[.!?])\s+", line)
-            summary = sentences[0].strip().strip("`\"'")
-            if not summary:
-                continue
-            if len(summary) > 200:
-                summary = summary[:197].rsplit(" ", 1)[0] + "..."
-            return summary
-
-        # Fallback: first non-empty line
-        for line in lines:
-            line = line.strip()
-            if line:
-                line = line.strip("`\"'")
-                return line[:197] + "..." if len(line) > 200 else line
-        return ""
+        return _parser_mod.extract_summary(text, max_chars=200, mode="sentence")
 
     def _detect_profile_name(self) -> str:
         """Detect the current Hermes profile name from hermes_home path.
@@ -922,25 +886,30 @@ class QMDWikiMemoryProvider(MemoryProvider):
             return []
 
         dirs = self._resolve_wiki_dirs()
-        qmd_paths: List[str] = []
+        # (path, score) pairs preserving QMD's relevance order + scores
+        qmd_hits: List[tuple] = []
 
         # Fast path: BM25 keyword search
         try:
             result = self._run_qmd("search", query, "--json", "-n", str(top_k * 3),
                                    "--full-path", "--min-score", "0.1")
             qmd_results = json.loads(result.stdout) if result.stdout else []
-            qmd_paths = [r.get("file", "") for r in qmd_results if isinstance(r, dict) and r.get("file")]
+            qmd_hits = [(r.get("file", ""), r.get("score", 0.0))
+                        for r in qmd_results
+                        if isinstance(r, dict) and r.get("file")]
         except Exception as e:
             logger.debug("QMD Wiki: BM25 search failed (%s), trying query...", e)
 
         # Fallback: hybrid query (slower but better quality)
-        if not qmd_paths:
+        if not qmd_hits:
             try:
                 result = self._run_qmd("query", query, "--json", "-n", str(top_k * 3),
                                        "--no-rerank", "--full-path", "--min-score", "0.1",
                                        timeout=120)
                 qmd_results = json.loads(result.stdout) if result.stdout else []
-                qmd_paths = [r.get("file", "") for r in qmd_results if isinstance(r, dict) and r.get("file")]
+                qmd_hits = [(r.get("file", ""), r.get("score", 0.0))
+                            for r in qmd_results
+                            if isinstance(r, dict) and r.get("file")]
             except Exception as e:
                 logger.error("QMD Wiki: search failed — qmd CLI returned: %s", e)
                 return []
@@ -948,9 +917,10 @@ class QMDWikiMemoryProvider(MemoryProvider):
         # Map QMD file paths to our WikiPage objects (absolute path matching)
         abs_pages = {os.path.abspath(p.path): p for p in self._pages}
         matched: List[WikiPage] = []
+        match_scores: Dict[str, float] = {}  # abs path -> QMD score
         seen_paths: set = set()
 
-        for match_path in qmd_paths:
+        for match_path, score in qmd_hits:
             match_abs = os.path.abspath(os.path.expanduser(match_path))
             if match_abs in seen_paths:
                 continue
@@ -959,6 +929,7 @@ class QMDWikiMemoryProvider(MemoryProvider):
             page = abs_pages.get(match_abs)
             if page:
                 matched.append(page)
+                match_scores[match_abs] = score
             else:
                 # Not in our catalog — try parsing it on the fly
                 if os.path.isfile(match_abs):
@@ -969,6 +940,7 @@ class QMDWikiMemoryProvider(MemoryProvider):
                                 page.source_dir = d
                                 break
                         matched.append(page)
+                        match_scores[match_abs] = score
                     except Exception:
                         pass
 
@@ -981,36 +953,62 @@ class QMDWikiMemoryProvider(MemoryProvider):
                 continue
             filtered.append(page)
 
-        # Apply confidence re-weighting (tiebreaker within QMD's ordering)
+        # True tiebreaker: QMD relevance (score, rounded) is primary; confidence
+        # only breaks near-ties. High-confidence does NOT outrank a more relevant
+        # medium/low page. Stable sort keeps QMD's order within equal keys.
         confidence_order = {"high": 0, "medium": 1, "low": 2}
-        filtered.sort(key=lambda p: (confidence_order.get(p.confidence, 1), p.title))
+
+        def _sort_key(page: WikiPage):
+            score = match_scores.get(os.path.abspath(page.path), 0.0)
+            # Round to 2 decimals so near-equal relevance is treated as a tie,
+            # allowing confidence to break it; clearly-better relevance always wins.
+            return (-round(float(score), 2),
+                    confidence_order.get(page.confidence, 1),
+                    page.title)
+
+        filtered.sort(key=_sort_key)
 
         return filtered[:top_k]
 
     def _find_page(self, title_or_path: str) -> Optional[WikiPage]:
-        """Find a page by title (fuzzy), path (partial), or wikilink target.
+        """Find a page by title (exact), path (partial), or wikilink target.
 
-        Tries: exact title, partial title, path substring, wikilink target.
+        Lookup order (strict to fuzzy) so a partial-substring title NEVER
+        outranks an exact title, path, or wikilink match:
+          1. exact title (case-insensitive)
+          2. exact filename slug / path substring
+          3. wikilink target resolution
+          4. partial title (last resort)
         Falls back to reading from filesystem if not in catalog.
         """
         query_lower = title_or_path.lower()
 
-        # Search our catalog first
+        # 1. Exact title match (case-insensitive)
         for page in self._pages:
             if page.title.lower() == query_lower:
                 return page
+
+        # 2. Exact filename slug / path substring
+        slug = slugify(title_or_path)
         for page in self._pages:
-            if query_lower in page.title.lower():
+            if slug and slug == os.path.splitext(os.path.basename(page.path))[0].lower():
                 return page
         for page in self._pages:
             if query_lower in page.path.lower():
                 return page
-        # Wikilink match
+
+        # 3. Wikilink target resolution (return the TARGET page, not the linker)
         for page in self._pages:
             for wl in page.wikilinks:
                 if query_lower == wl.lower():
                     target = self._find_page_by_title(wl)
-                    return target or page
+                    if target:
+                        return target
+
+        # 4. Partial title (last resort)
+        for page in self._pages:
+            if query_lower in page.title.lower():
+                return page
 
         # Not in catalog — try reading directly from filesystem
         dirs = self._resolve_wiki_dirs()
@@ -1084,6 +1082,11 @@ class QMDWikiMemoryProvider(MemoryProvider):
         if not dirs:
             return None
         if not directory:
+            # Default to the Wiki/ dir if present (semantic pages), else the
+            # first configured dir. Avoids writing to a bare root / first-entry.
+            for d in dirs:
+                if os.path.basename(d) == "Wiki":
+                    return d
             return dirs[0]
         for d in dirs:
             if os.path.basename(d) == directory:
