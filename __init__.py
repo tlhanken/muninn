@@ -68,6 +68,9 @@ except Exception:
 # QMD binary — provided by Nix package (nix/packages/qmd.nix)
 _QMD_BIN = shutil.which("qmd") or "qmd"
 
+# Default QMD index name (each profile gets its own via --index)
+_DEFAULT_INDEX_NAME = "index"
+
 # Default wiki directories to check (first existing wins, used when no config)
 _DEFAULT_WIKI_DIRS = [
     os.path.expanduser("~/SynologyDrive/Obsidian Vault/04 - AI/Wiki"),
@@ -359,8 +362,11 @@ class QMDWikiMemoryProvider(MemoryProvider):
 
         Returns:
             subprocess.CompletedProcess with stdout/stderr captured
+
+        Each profile uses its own QMD index (--index <name>), so per-agent
+        isolation is structural at the index layer.
         """
-        cmd = [_QMD_BIN] + list(args)
+        cmd = [_QMD_BIN, "--index", self._index_name()] + list(args)
         try:
             result = subprocess.run(
                 cmd,
@@ -757,6 +763,17 @@ class QMDWikiMemoryProvider(MemoryProvider):
         except Exception:
             pass
         return "default"
+
+    def _index_name(self) -> str:
+        """Return the QMD index name for this profile.
+
+        Every profile — including the default/primary — gets its OWN QMD index
+        (--index <name>), built only from its own wiki_dirs. This makes
+        per-agent isolation structural: a dir not on the profile's allowlist is
+        not in its index and cannot surface in search. The legacy default
+        'index' store (with stale Restructured collections) is abandoned.
+        """
+        return self._detect_profile_name() or _DEFAULT_INDEX_NAME
 
     def _inject_frontmatter_field(self, file_path: str, field: str, value: str, yaml_safe: bool = False) -> None:
         """Inject a field into the YAML frontmatter of a markdown file.
