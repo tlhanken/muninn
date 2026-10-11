@@ -5,11 +5,13 @@ Pure stdlib, no external dependencies. Works on NixOS.
 
 from __future__ import annotations
 
-import re
+import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
+import unicodedata
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
@@ -66,6 +68,68 @@ class WikiPage:
         return " ".join(parts)
 
 
+def _yaml_dquote(value: str) -> str:
+    """Render a string as a YAML double-quoted scalar.
+
+    Double-quoted style uses backslash escapes, so `"` and `\\` inside the value
+    are escaped instead of terminating the scalar. `parse_frontmatter` reverses
+    this via `_yaml_undquote`.
+    """
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _yaml_undquote(value: str) -> str:
+    """Reverse `_yaml_dquote` for a double-quoted scalar (quotes already stripped)."""
+    out = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            out.append({"n": "\n", "t": "\t"}.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_flow_items(text: str) -> List[str]:
+    """Split a YAML flow-sequence body on commas that are not inside quotes.
+
+    A quoted item may itself contain a comma, so a naive `split(",")` corrupts
+    tags like `"a,b"`.
+    """
+    items: List[str] = []
+    buf: List[str] = []
+    quote = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            buf.append(ch)
+            if quote == '"' and ch == "\\" and i + 1 < len(text):
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+        elif ch == ",":
+            items.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    items.append("".join(buf))
+    return items
+
+
 def parse_frontmatter(content: str) -> Tuple[dict, str]:
     """Extract YAML frontmatter and return (metadata, body).
 
@@ -99,15 +163,25 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
         key = key.strip()
         value = value.strip()
 
-        # Handle quoted strings
+        # Handle quoted strings (double quotes carry backslash escapes)
         if value.startswith('"') and value.endswith('"'):
-            value = value[1:-1]
+            value = _yaml_undquote(value[1:-1])
         elif value.startswith("'") and value.endswith("'"):
             value = value[1:-1]
 
-        # Handle list values [a, b, c]
+        # Handle list values [a, b, c] — split only on commas outside quotes, so
+        # a quoted item is preserved as one entry even if it contains a comma.
         if value.startswith("[") and value.endswith("]"):
-            items = [v.strip().strip('"\'') for v in value[1:-1].split(",") if v.strip()]
+            items = []
+            for raw in _split_flow_items(value[1:-1]):
+                item = raw.strip()
+                if not item:
+                    continue
+                if item.startswith('"') and item.endswith('"'):
+                    item = _yaml_undquote(item[1:-1])
+                elif item.startswith("'") and item.endswith("'"):
+                    item = item[1:-1]
+                items.append(item)
             metadata[key] = items
         else:
             metadata[key] = value
@@ -358,18 +432,24 @@ def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:
 def slugify(title: str) -> str:
     """Convert a title to a SCHEMA-compliant filename (without extension).
 
-    Rules: lowercase, spaces → hyphens, strip non-alphanumeric except hyphens,
-    collapse consecutive hyphens, max 80 chars, no leading/trailing hyphens.
+    Rules: lowercase, spaces → hyphens, strip punctuation, collapse consecutive
+    hyphens, max 80 chars, no leading/trailing hyphens. Unicode letters and
+    digits are preserved, so a non-ASCII title keeps a stable, distinct slug
+    rather than collapsing to a shared placeholder.
     """
-    s = title.lower().strip()
+    s = unicodedata.normalize("NFC", title.lower().strip())
     s = re.sub(r'[/\\._]', ' ', s)      # separators → spaces (before strip)
-    s = re.sub(r'[^a-z0-9\s-]', '', s)  # strip non-alphanumeric (keep spaces, hyphens)
+    s = re.sub(r'[^\w\s-]', '', s)      # strip punctuation (keep Unicode word chars)
     s = re.sub(r'[\s]+', '-', s)         # spaces → hyphens
     s = re.sub(r'-+', '-', s)            # collapse consecutive hyphens
     s = s.strip('-')                      # no leading/trailing hyphens
     if len(s) > 80:
         s = s[:80].rsplit('-', 1)[0]     # cut at word boundary near 80 chars
-    return s or 'untitled'
+    if not s:
+        # Deterministic, distinct fallback — an empty slug must not make two
+        # unrelated titles collide on the same filename.
+        return "untitled-" + hashlib.sha1(title.encode("utf-8")).hexdigest()[:8]
+    return s
 
 
 def generate_frontmatter(
@@ -393,9 +473,9 @@ def generate_frontmatter(
         updated = now
 
     lines = ["---"]
-    lines.append(f'title: "{title}"')
+    lines.append(f'title: {_yaml_dquote(title)}')
     if tags:
-        lines.append(f'tags: [{", ".join(tags)}]')
+        lines.append(f'tags: [{", ".join(_yaml_dquote(t) for t in tags)}]')
     if page_type:
         lines.append(f'type: {page_type}')
     lines.append(f'confidence: {confidence}')
