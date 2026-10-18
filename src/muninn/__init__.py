@@ -233,7 +233,7 @@ WIKI_APPEND_SCHEMA = {
 }
 
 
-class QMDWikiMemoryProvider(MemoryProvider):
+class MuninnMemoryProvider(MemoryProvider):
     """Memory provider — thin Bridge wrapper around QMD CLI for search + indexing.
 
     QMD handles all search and indexing (BM25, vectors, reranking). This plugin:
@@ -1290,4 +1290,4 @@ class QMDWikiMemoryProvider(MemoryProvider):
 
 def register(ctx):
     """Plugin registration entry point."""
-    ctx.register_memory_provider(QMDWikiMemoryProvider())
+    ctx.register_memory_provider(MuninnMemoryProvider())
