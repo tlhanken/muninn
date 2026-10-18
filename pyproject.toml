@@ -7,10 +7,11 @@ name = "muninn"
 version = "0.1.0"
 description = "Hermes memory provider backed by .qmd/.md wiki files: OKF-aware search, wikilink extraction, write/append tools, session logging, and executable code cells for living knowledge verification."
 readme = "README.md"
-# Matches Hermes' own ceiling. The provider is imported into Hermes' environment,
-# so it must be installable by the same interpreter range; 3.14 is excluded
-# because pydantic-core has no cp314 wheel and Hermes cannot run there.
-requires-python = ">=3.11,<3.14"
+# The provider is imported into Hermes' own environment, so it has to install under
+# whatever interpreter Hermes runs. No upper bound: Hermes has run on 3.12 and is
+# now running 3.14 (pinned venv reports 3.14.7), and a stale ceiling would block the
+# newer one for no gain — the code is plain 3.11+ Python.
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = ["pyyaml>=6"]
 
