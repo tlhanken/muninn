@@ -101,22 +101,6 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
-      "locked": {
-        "lastModified": 1792094642,
-        "narHash": "sha256-zp8ToDMnqZcu4o4IH9pdwXFXGp7yLm/M0dEnNWnyd7I=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "fe13242281a67641c0102cdb1087f0ebe586c7df",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "fe13242281a67641c0102cdb1087f0ebe586c7df",
-        "type": "github"
-      }
-    },
     "npm-lockfile-fix": {
       "inputs": {
         "nixpkgs": [
@@ -192,7 +176,10 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "hermes-agent": "hermes-agent",
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": [
+          "hermes-agent",
+          "nixpkgs"
+        ]
       }
     },
     "systems": {

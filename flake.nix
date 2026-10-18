@@ -2,19 +2,16 @@
   description = "Muninn — Hermes memory provider backed by .qmd/.md wiki files";
 
   inputs = {
-    # Pinned to the exact revision nixos-config locks, so Muninn's Python closure
-    # substitutes from cache instead of rebuilding. Bump this together with
-    # nixos-config's nixpkgs, never independently.
-    nixpkgs.url = "github:NixOS/nixpkgs/fe13242281a67641c0102cdb1087f0ebe586c7df";
+    # The Hermes revision nixos-config locks. This is the one version-sensitive pin
+    # in this flake: everything Python-shaped is derived from it below, and it must
+    # move together with nixos-config's hermes-agent input.
+    hermes-agent.url = "github:NousResearch/hermes-agent/548091836760a67e331b8f5643be8e5c08fae1e6";
+
+    # Follow Hermes' own nixpkgs rather than pinning a second one, so the package
+    # set here is the same one Hermes is built from.
+    nixpkgs.follows = "hermes-agent/nixpkgs";
 
     flake-utils.url = "github:numtide/flake-utils";
-
-    # The Hermes revision nixos-config deploys. The dev shell needs it because the
-    # provider is imported into Hermes' environment: Tier 2 must run under the 3.12
-    # interpreter Hermes actually uses, never uv's. `passthru.devDeps` brings that
-    # interpreter plus the dev dependency group (pytest), and `passthru.devShellHook`
-    # exports HERMES_PYTHON pointing at it.
-    hermes-agent.url = "github:NousResearch/hermes-agent/548091836760a67e331b8f5643be8e5c08fae1e6";
   };
 
   outputs =
@@ -28,8 +25,14 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        python = pkgs.python312;
         hermes = hermes-agent.packages.${system}.default;
+
+        # The exact interpreter Hermes runs. hermes-agent derives it from
+        # pm/lock.json (nix/pythonLock.nix) and exposes it as passthru.python, so it
+        # is never hardcoded here and never has to be kept in step by hand: when the
+        # pin moves Hermes from 3.12 to 3.14, this package follows automatically.
+        # That matters because the package is loaded INTO Hermes' environment.
+        python = hermes.passthru.python;
 
         muninn = python.pkgs.buildPythonPackage {
           pname = "muninn";
@@ -68,8 +71,8 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.just
-            python
             pkgs.uv
+            python
           ]
           ++ hermes.passthru.devDeps;
 
