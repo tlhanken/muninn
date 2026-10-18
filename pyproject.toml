@@ -20,7 +20,7 @@ dependencies = ["pyyaml>=6"]
 # provider's own `name` property. Points at the package (not a callable) because
 # only a package entry point yields a directory, which is where Hermes reads
 # config_schema.py and cli.py for the dashboard panel and `hermes <provider>`.
-qmd-wiki = "muninn"
+muninn = "muninn"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/muninn"]

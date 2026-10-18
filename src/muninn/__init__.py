@@ -261,7 +261,7 @@ class QMDWikiMemoryProvider(MemoryProvider):
 
     @property
     def name(self) -> str:
-        return "qmd-wiki"
+        return "muninn"
 
     def is_available(self) -> bool:
         dirs = self._resolve_wiki_dirs()

@@ -29,7 +29,17 @@ once the flake lands. Tier 2 needs Hermes' own interpreter (3.11–3.13), not th
 
 ## Status
 
-Extracted from `~/workspace/tools` with history intact. The provider identifier is
-still `qmd-wiki` on the running system; the rename to `muninn` lands together with
-the `memory.provider` config change, and the old `~/.hermes/plugins/qmd-wiki`
-symlink is retired only after Muninn is discovered from the environment.
+Extracted from `~/workspace/tools` with history intact. The provider identity is
+`muninn` here; the running system still reports `qmd-wiki` because Hermes loads the
+tools copy through the `~/.hermes/plugins/qmd-wiki` symlink. Swapping over is three
+steps, in this order: install Muninn into the environment so entry-point discovery
+finds it, change `memory.provider` to `muninn` in the affected profiles, and only
+then retire the symlink and remove the copy from tools.
+
+Deliberately *not* renamed, because they are data contracts that already hold state:
+
+  - `~/.hermes/qmd-wiki.json` — the config file, present in the default home and in
+    `omen`, `lyra` and `vex`. Renaming the path would need a migration for no gain.
+  - `QMD_WIKI_DIR` — the wiki-directory environment variable (already legacy).
+  - `"qmd_wiki_parser"` — the synthetic `sys.modules` key used when loading
+    `parser.py` by path. Internal, and the loading mechanism is delicate.
