@@ -21,7 +21,27 @@
       flake-utils,
       hermes-agent,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    let
+      # Integration surfaces, defined once and system-independent. They point at this
+      # flake's own package, so a consumer gets the interpreter-correct build instead
+      # of one rebuilt against their own pkgs.
+      module = import ./nix/module.nix { inherit self; };
+    in
+    {
+      # Consumption is one import line:
+      #   imports = [ inputs.muninn.nixosModules.default ];        # or
+      #   imports = [ inputs.muninn.homeManagerModules.default ];
+      # The module adds the package to services.hermes-agent.extraPythonPackages and
+      # defaults memory.provider to "muninn".
+      nixosModules.default = module;
+      homeManagerModules.default = module;
+
+      # For consumption that wants the package directly: pkgs.muninn.
+      overlays.default = final: prev: {
+        muninn = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -61,13 +81,12 @@
         packages.muninn = muninn;
         checks.default = muninn;
 
-        # nixos-config consumes this for entry-point discovery:
-        #   hermesAgent = inputs.hermes-agent.packages.${system}.default.override {
-        #     extraPythonPackages = [ inputs.muninn.packages.${system}.default ];
-        #   };
-        # extraPythonPackages appends the package's site-packages to Hermes'
-        # PYTHONPATH, which is what puts muninn's dist-info where
+        # Consumers: either the module (input + one import line) or the package
+        # directly. extraPythonPackages appends the package's site-packages to
+        # Hermes' PYTHONPATH, which is what puts muninn's dist-info where
         # importlib.metadata can find the hermes_agent.memory_providers entry point.
+        # The package path remains necessary for setups that consume the Hermes
+        # package directly rather than through services.hermes-agent.
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.just

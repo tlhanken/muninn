@@ -16,35 +16,47 @@ Muninn is a Python package that Hermes discovers through an entry point
 directory — it is visible to **every** profile, including ones with no `plugins/`
 directory of their own.
 
-Declare it as a flake input:
+Muninn can present its own integration, so consuming it is an input plus one import
+line:
+
+```nix
+imports = [ inputs.muninn.nixosModules.default ];      # or homeManagerModules.default
+```
+
+The module adds the package to `services.hermes-agent.extraPythonPackages` and defaults
+`settings.memory.provider` to `"muninn"` — with `mkDefault`, so a host can still pick a
+different provider. Importing it where the Hermes modules are not present is inert, not
+an error. It is exported as both `nixosModules.default` and
+`homeManagerModules.default` because the option paths under `services.hermes-agent` are
+identical in both.
+
+The flake input still needs the follows edges — Nix only lets the *consumer* declare
+those, so they cannot be pushed into Muninn:
 
 ```nix
 muninn = {
   url = "github:tlhanken/muninn";
   inputs.nixpkgs.follows = "nixpkgs-unstable";
-  # Share nixos-config's hermes-agent, so there is exactly one Hermes revision in
-  # the graph. Without this, this repo's own pin could name a different revision
-  # than the one actually running, and the build interpreter would stop matching
-  # the venv the package is loaded into.
+  # Share nixos-config's hermes-agent, so there is exactly one Hermes revision in the
+  # graph. Without this, this repo's own pin could name a different revision than the
+  # one actually running, and the build interpreter would stop matching the venv the
+  # package is loaded into.
   inputs.hermes-agent.follows = "hermes-agent";
 };
 ```
 
-Then give it to Hermes — as a NixOS service option, or as a Home Manager override:
+If a host consumes the Hermes *package* directly rather than through
+`services.hermes-agent` — as the sleipnir profile does — the module cannot reach it, and
+the explicit form is the way:
 
 ```nix
-services.hermes-agent.extraPythonPackages = [ inputs.muninn.packages.${system}.default ];
-# or
 hermesAgent = inputs.hermes-agent.packages.${system}.default.override {
   extraPythonPackages = [ inputs.muninn.packages.${system}.default ];
 };
 ```
 
-…and select it declaratively:
-
-```nix
-settings.memory.provider = "muninn";
-```
+`overlays.default` is also provided, so `pkgs.muninn` works wherever an overlay list is
+already in play.
 
 Two details of that wiring are load-bearing:
 
