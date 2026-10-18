@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "muninn"
+version = "0.1.0"
+description = "Hermes memory provider backed by .qmd/.md wiki files: OKF-aware search, wikilink extraction, write/append tools, session logging, and executable code cells for living knowledge verification."
+readme = "README.md"
+# Matches Hermes' own ceiling. The provider is imported into Hermes' environment,
+# so it must be installable by the same interpreter range; 3.14 is excluded
+# because pydantic-core has no cp314 wheel and Hermes cannot run there.
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+dependencies = ["pyyaml>=6"]
+
+[project.entry-points."hermes_agent.memory_providers"]
+# Names the provider. For a pip/entry-point install Hermes builds the provider's
+# collector from this name, so it must equal `memory.provider` in config and the
+# provider's own `name` property. Points at the package (not a callable) because
+# only a package entry point yields a directory, which is where Hermes reads
+# config_schema.py and cli.py for the dashboard panel and `hermes <provider>`.
+qmd-wiki = "muninn"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/muninn"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
