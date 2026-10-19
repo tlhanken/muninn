@@ -30,7 +30,12 @@ in
     # directory of their own — a symlink cannot do that.
     services.hermes-agent.extraPythonPackages = [ muninn ];
 
-    # mkDefault, so a host can still select a different provider.
-    services.hermes-agent.settings.memory.provider = lib.mkDefault "muninn";
+    # Plain value, NOT lib.mkDefault: `settings` is a loose deepConfigType, so an
+    # override marker applied to a nested key is never resolved and toJSON serialises
+    # it verbatim — the rendered config.yaml would carry
+    # {"_type": "override", "content": "muninn", "priority": 1000} where Hermes expects
+    # the string "muninn". The merge into config.yaml is a deep merge, so a host that
+    # wants a different provider can still set settings.memory.provider itself.
+    services.hermes-agent.settings.memory.provider = "muninn";
   };
 }
