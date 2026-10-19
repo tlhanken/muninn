@@ -2,9 +2,8 @@
   description = "Muninn — Hermes memory provider backed by .qmd/.md wiki files";
 
   inputs = {
-    # The Hermes revision nixos-config locks. This is the one version-sensitive pin
-    # in this flake: everything Python-shaped is derived from it below, and it must
-    # move together with nixos-config's hermes-agent input.
+    # The Hermes revision this repo is developed and tested against. The consumer's
+    # follows edge decides what it is actually built with.
     hermes-agent.url = "github:NousResearch/hermes-agent/548091836760a67e331b8f5643be8e5c08fae1e6";
 
     # Follow Hermes' own nixpkgs rather than pinning a second one, so the package
@@ -32,7 +31,7 @@
       #   imports = [ inputs.muninn.nixosModules.default ];        # or
       #   imports = [ inputs.muninn.homeManagerModules.default ];
       # The module adds the package to services.hermes-agent.extraPythonPackages and
-      # defaults memory.provider to "muninn".
+      # selects memory.provider = "muninn".
       nixosModules.default = module;
       homeManagerModules.default = module;
 
@@ -58,7 +57,7 @@
           pname = "muninn";
           version = "0.1.0"; # keep in step with pyproject.toml
           pyproject = true;
-          src = ./.;
+          src = ./.; # git-tracked files only; a new file is invisible until staged
           build-system = [ python.pkgs.hatchling ];
 
           # pyyaml is deliberately NOT a runtime dependency of this derivation.
@@ -92,16 +91,76 @@
             pkgs.just
             pkgs.uv
             python
+            # The package itself, not just its source: this derivation carries
+            # muninn-0.1.0.dist-info, and the dist-info is what makes the
+            # hermes_agent.memory_providers entry point discoverable. Tier 2 tests
+            # discovery, so it needs the entry point.
+            muninn
           ]
           ++ hermes.passthru.devDeps;
 
           shellHook = ''
             ${hermes.passthru.devShellHook}
+            # The editable install resolves every Hermes module through
+            # $HERMES_PYTHON_SRC_ROOT: see __editable___hermes_agent_*_finder.py, whose
+            # mapping is all expandvars('$HERMES_PYTHON_SRC_ROOT/<name>'). The dev shell
+            # hook does not set it, so the placeholders stay literal, every mapping
+            # misses, and `import agent` fails — which is how the first Tier 2 run failed
+            # while looking like a missing dependency. hermes-agent.outPath is the source
+            # the editable env was built from.
+            export HERMES_PYTHON_SRC_ROOT="${hermes-agent.outPath}"
+            # Derive the version directory. A hardcoded lib/python3.12/site-packages
+            # points at nothing, and entry-point discovery then silently returns empty.
+            export PYTHONPATH="${muninn}/${python.sitePackages}''${PYTHONPATH:+:$PYTHONPATH}"
             echo "Muninn dev shell"
-            echo "  Tier 1: uv run --no-project --python-preference only-system --with pytest --with pyyaml python -m pytest tests/test_parser_contract.py -q"
-            echo "  Tier 2: \$HERMES_PYTHON -m pytest tests/ -q   (HERMES_PYTHON=$HERMES_PYTHON)"
+            echo "  Tier 1: just test"
+            echo "  Tier 2: just test-hermes   (HERMES_PYTHON=$HERMES_PYTHON)"
           '';
         };
+      }
+      // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "linux" system) {
+        # A check that would have caught a real bug. Assigning the provider inside
+        # `settings` with lib.mkDefault leaves Nix's override marker unresolved —
+        # `settings` is a loose deepConfigType rendered with a bare builtins.toJSON — so
+        # config.yaml would carry {"_type":"override",...} where Hermes expects the
+        # string, and the provider would be silently wrong. Assert the value *and its
+        # type* here, where the module is evaluated for real. Linux only: the Hermes
+        # module is a NixOS module, so a darwin system cannot host it. The guard tests
+        # the `system` string rather than pkgs.stdenv.hostPlatform.isLinux, because
+        # forcing `pkgs` on a system nixpkgs has dropped (x86_64-darwin in 26.11) is
+        # itself a hard error.
+        checks.moduleWiring =
+          let
+            wired =
+              (nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  hermes-agent.nixosModules.default
+                  module
+                  {
+                    services.hermes-agent.enable = true;
+                    services.hermes-agent.stateDir = "/tmp/muninn-wiring-check";
+                  }
+                ];
+              }).config.services.hermes-agent;
+            provider = wired.settings.memory.provider;
+            count = builtins.length wired.extraPythonPackages;
+          in
+          if !(builtins.isString provider) then
+            throw ''
+              muninn: settings.memory.provider is a ${builtins.typeOf provider}, not a
+              string. Do not use lib.mkDefault (or mkForce) inside services.hermes-agent
+              .settings — the override marker is never resolved and lands in the
+              generated config.yaml verbatim.
+            ''
+          else if provider != "muninn" then
+            throw ''muninn: settings.memory.provider is "${toString provider}", expected "muninn"''
+          else if count != 1 then
+            throw ''muninn: expected exactly 1 extraPythonPackages entry, got ${toString count}''
+          else
+            pkgs.runCommand "muninn-module-wiring-ok" { } ''
+              echo "settings.memory.provider is the string \"muninn\"; extraPythonPackages has 1 entry" > $out
+            '';
       }
     );
 }
