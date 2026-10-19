@@ -17,6 +17,50 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
 
+# --- The memory-interfaces contract -------------------------------------------
+#
+# These constants are the single definition of the formats Muninn reads and writes.
+# Nothing else may define them: __init__.py imports them, the living spec
+# openspec/specs/memory-interfaces/spec.md documents them, the vault SCHEMA.md
+# defers to that spec, and the Tier 1 contract test fails if code and spec disagree.
+
+# Page types `wiki_write` accepts. Any other type is rejected on write; files already
+# on disk with another type (e.g. the retired `dream-candidate`) still parse.
+PAGE_TYPES: Tuple[str, ...] = (
+    "concept", "entity", "comparison", "query", "summary",
+    "decision", "episodic", "procedural", "executive",
+    "identity", "user", "self-model", "strategy", "note",
+)
+
+# Confidence levels. Anything else is coerced to the default on read and on write.
+CONFIDENCE_LEVELS: Tuple[str, ...] = ("high", "medium", "low")
+DEFAULT_CONFIDENCE = "medium"
+
+# Page statuses. Anything else is coerced to the default on read. `candidate` has no
+# current writer but is kept so existing pages keep their meaning.
+STATUSES: Tuple[str, ...] = ("active", "superseded", "rejected", "candidate")
+DEFAULT_STATUS = "active"
+
+# Statuses whose pages never appear in search results.
+SEARCH_EXCLUDED_STATUSES: Tuple[str, ...] = ("superseded", "rejected")
+
+# Session logs: Episodic/sessions/session-<YYYY-MM-DD>-<sid8>.md
+SESSION_LOG_DIR = "sessions"
+SESSION_LOG_TYPE = "episodic"
+SESSION_LOG_TAGS: Tuple[str, ...] = ("session", "log")  # plus agent:<profile>
+# Frontmatter fields of a session log. `summary` is added when the session ends.
+SESSION_LOG_FIELDS: Tuple[str, ...] = (
+    "title", "tags", "type", "confidence", "status", "created", "updated",
+    "agent", "summary",
+)
+SESSION_SPEAKERS: Tuple[str, ...] = ("User", "Assistant")
+# One entry per speaker per turn: "### 2026-10-18 21:10 UTC | User"
+SESSION_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M UTC"
+SESSION_ENTRY_RE = re.compile(
+    r"^### \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC \| (?:User|Assistant)$", re.MULTILINE
+)
+
+
 @dataclass
 class CodeCell:
     """A fenced code cell from a .qmd file."""
@@ -40,8 +84,8 @@ class WikiPage:
 
     # OKF metadata (from frontmatter)
     page_type: Optional[str] = None  # frontmatter "type" field
-    confidence: str = "medium"  # "high", "medium", "low" (default medium)
-    status: str = "active"  # "active", "superseded", "rejected" (default active)
+    confidence: str = DEFAULT_CONFIDENCE  # one of CONFIDENCE_LEVELS
+    status: str = DEFAULT_STATUS  # one of STATUSES
 
     # Wikilinks extracted from markdown body
     wikilinks: List[str] = field(default_factory=list)
@@ -390,13 +434,13 @@ def parse_wiki_file(path: str, execute_cells: bool = False) -> WikiPage:
 
     # Extract OKF metadata from frontmatter
     page_type = metadata.get("type")
-    confidence = metadata.get("confidence", "medium")
-    if confidence not in ("high", "medium", "low"):
-        confidence = "medium"
+    confidence = metadata.get("confidence", DEFAULT_CONFIDENCE)
+    if confidence not in CONFIDENCE_LEVELS:
+        confidence = DEFAULT_CONFIDENCE
 
-    status = metadata.get("status", "active")
-    if status not in ("active", "superseded", "rejected", "candidate"):
-        status = "active"
+    status = metadata.get("status", DEFAULT_STATUS)
+    if status not in STATUSES:
+        status = DEFAULT_STATUS
 
     # Extract wikilinks from the markdown body
     wikilinks = extract_wikilinks(markdown)
@@ -456,8 +500,8 @@ def generate_frontmatter(
     title: str,
     tags: Optional[List[str]] = None,
     page_type: Optional[str] = None,
-    confidence: str = "medium",
-    status: str = "active",
+    confidence: str = DEFAULT_CONFIDENCE,
+    status: str = DEFAULT_STATUS,
     created: Optional[str] = None,
     updated: Optional[str] = None,
     extra_fields: Optional[dict] = None,
@@ -495,8 +539,8 @@ def write_wiki_file(
     content: str,
     tags: Optional[List[str]] = None,
     page_type: Optional[str] = None,
-    confidence: str = "medium",
-    status: str = "active",
+    confidence: str = DEFAULT_CONFIDENCE,
+    status: str = DEFAULT_STATUS,
 ) -> dict:
     """Write a wiki page to disk with auto-generated frontmatter.
 
@@ -581,8 +625,8 @@ def append_to_wiki_file(path: str, content: str, section: Optional[str] = None) 
         title=meta.get("title", os.path.basename(path).replace(".md", "")),
         tags=tags,
         page_type=meta.get("type"),
-        confidence=meta.get("confidence", "medium"),
-        status=meta.get("status", "active"),
+        confidence=meta.get("confidence", DEFAULT_CONFIDENCE),
+        status=meta.get("status", DEFAULT_STATUS),
         created=meta.get("created"),
         updated=now,
         extra_fields={
@@ -599,6 +643,59 @@ def append_to_wiki_file(path: str, content: str, section: Optional[str] = None) 
     return new_content
 
 
+# --- Session logs ---------------------------------------------------------------
+#
+# The session-log format lives here, next to the constants that define it, so the
+# provider and the Tier 1 contract test exercise the same code.
+
+def session_slug(now: datetime, session_id: str = "") -> str:
+    """File stem of a session log: ``session-<YYYY-MM-DD>-<sid8>``.
+
+    ``sid8`` is the first 8 hex digits of the session id's SHA-256. Without a session
+    id the stem falls back to ``session-<YYYY-MM-DD-HHMM>``. The date is the UTC date of
+    the turn, so a session that crosses UTC midnight continues in a new file.
+    """
+    if session_id:
+        sid_hash = hashlib.sha256(session_id.encode()).hexdigest()[:8]
+        return f"session-{now.strftime('%Y-%m-%d')}-{sid_hash}"
+    return f"session-{now.strftime('%Y-%m-%d-%H%M')}"
+
+
+def format_session_turn(now: datetime, user_content: str, assistant_content: str) -> str:
+    """Render one turn as two entries, one per speaker, with full content.
+
+    Triple backticks are broken with zero-width spaces so a message cannot open a
+    fence that swallows the entries after it.
+    """
+    timestamp = now.strftime(SESSION_TIMESTAMP_FORMAT)
+    user_clean = user_content.replace("```", "`​`​`")
+    asst_clean = assistant_content.replace("```", "`​`​`")
+    return (
+        f"### {timestamp} | User\n\n{user_clean}\n\n"
+        f"### {timestamp} | Assistant\n\n{asst_clean}\n\n"
+    )
+
+
+def create_session_log(path: str, now: datetime, agent: str, entries: str) -> None:
+    """Create a session log with its frontmatter and the first turn's entries."""
+    fm = generate_frontmatter(
+        title=f"Session {now.strftime('%Y-%m-%d')}",
+        tags=[*SESSION_LOG_TAGS, f"agent:{agent}"],
+        page_type=SESSION_LOG_TYPE,
+        confidence=DEFAULT_CONFIDENCE,
+        status=DEFAULT_STATUS,
+        extra_fields={"agent": agent},
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{fm}\n\n{entries}")
+
+
+def count_session_entries(text: str) -> int:
+    """Number of speaker entries in a session log body."""
+    return len(SESSION_ENTRY_RE.findall(text))
+
+
 def format_page_for_context(page: WikiPage, max_chars: int = 3000) -> str:
     """Format a wiki page for injection into session context."""
     lines = []
@@ -607,7 +704,7 @@ def format_page_for_context(page: WikiPage, max_chars: int = 3000) -> str:
         lines.append(f"Tags: {', '.join(page.tags)}")
     if page.page_type:
         lines.append(f"Type: {page.page_type}")
-    if page.confidence != "medium":
+    if page.confidence != DEFAULT_CONFIDENCE:
         lines.append(f"Confidence: {page.confidence}")
     if page.last_verified:
         lines.append(f"Last verified: {page.last_verified}")
