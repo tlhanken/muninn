@@ -123,7 +123,7 @@ The system SHALL provide a `wiki_append` tool that appends content to an existin
 - **THEN** the call is refused
 
 ### Requirement: Session logging via sync_turn
-The system SHALL log session activity to `Episodic/sessions/` on each turn. On first call per session, creates a session file with frontmatter. On subsequent calls, appends a timestamped entry with truncated user/assistant content (200 chars each). If Episodic/ is not in wiki_dirs, skips silently.
+The system SHALL log session activity to `Episodic/sessions/` on each turn, in the format defined by the `memory-interfaces` spec. On the first call per session it SHALL create a session file with frontmatter; on later calls it SHALL append the turn. Every turn SHALL be logged in full, with no truncation, and no entry SHALL ever be removed from a session log. If Episodic/ is not in wiki_dirs, logging SHALL be skipped silently.
 
 #### Scenario: First turn of session
 - **WHEN** `sync_turn` is called for the first time in a session
@@ -132,10 +132,12 @@ The system SHALL log session activity to `Episodic/sessions/` on each turn. On f
 
 #### Scenario: Subsequent turns
 - **WHEN** `sync_turn` is called again in the same session
-- **THEN** a timestamped entry is appended to the session file
-- **AND** the entry boundary is identified by `### <ISO-date>` pattern, not raw `### ` (prevents markdown in message content from corrupting boundaries)
-- **AND** the file is capped at 200 entries — oldest 25 stripped when exceeded
-- **AND** the full content of each turn is preserved
+- **THEN** the turn is appended to the end of the session file in full
+- **AND** the file is not rewritten, so the entries already logged are left byte-for-byte unchanged
+
+#### Scenario: Long session keeps every entry
+- **WHEN** a session reaches 250 turns
+- **THEN** its log holds all 500 entries, the first turn included
 
 #### Scenario: Agent identity in session metadata
 - **WHEN** a new session file is created

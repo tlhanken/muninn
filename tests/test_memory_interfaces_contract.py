@@ -165,3 +165,40 @@ def test_session_entries_are_one_per_speaker_with_full_content():
 def test_heading_inside_a_message_is_not_an_entry():
     entries = p.format_session_turn(NOW, "### 2026 plans\n### Notes", "ok")
     assert p.count_session_entries(entries) == 2
+
+
+# --- session logs are append-only and uncapped -------------------------------------
+
+def _new_log(tmp_path) -> Path:
+    path = tmp_path / "sessions" / f"{p.session_slug(NOW, 'long')}.md"
+    p.create_session_log(str(path), NOW, "sera", p.format_session_turn(NOW, "turn 0", "reply 0"))
+    return path
+
+
+def test_long_session_keeps_every_entry(tmp_path):
+    path = _new_log(tmp_path)
+    for i in range(1, 250):
+        p.append_session_turn(str(path), p.format_session_turn(NOW, f"turn {i}", f"reply {i}"))
+
+    text = path.read_text(encoding="utf-8")
+    assert p.count_session_entries(text) == 500
+    assert "turn 0\n" in text and "turn 249\n" in text
+    assert set(_frontmatter(path)) == set(p.SESSION_LOG_FIELDS) - {"summary"}
+
+
+def test_append_leaves_logged_bytes_unchanged(tmp_path):
+    path = _new_log(tmp_path)
+    before = path.read_bytes()
+    p.append_session_turn(str(path), p.format_session_turn(NOW, "next", "reply"))
+    after = path.read_bytes()
+    assert after.startswith(before)
+    assert p.count_session_entries(after.decode("utf-8")) == 4
+
+
+def test_append_separates_entries_whatever_the_file_ends_with(tmp_path):
+    path = _new_log(tmp_path)
+    path.write_text(path.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
+    p.append_session_turn(str(path), p.format_session_turn(NOW, "next", "reply"))
+    text = path.read_text(encoding="utf-8")
+    assert "reply 0\n\n### " in text
+    assert p.count_session_entries(text) == 4

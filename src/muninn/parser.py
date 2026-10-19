@@ -691,6 +691,28 @@ def create_session_log(path: str, now: datetime, agent: str, entries: str) -> No
         f.write(f"{fm}\n\n{entries}")
 
 
+def append_session_turn(path: str, entries: str) -> None:
+    """Append a turn's entries to an existing session log, keeping every earlier entry.
+
+    The file is opened in append mode and never rewritten, so a failed write cannot
+    lose what is already logged, and the cost of a turn does not grow with the log.
+    Only the separator before the new entries depends on the file's last two bytes.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - 2))
+        tail = f.read()
+    if tail.endswith(b"\n\n") or size == 0:
+        separator = ""
+    elif tail.endswith(b"\n"):
+        separator = "\n"
+    else:
+        separator = "\n\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(separator + entries)
+
+
 def count_session_entries(text: str) -> int:
     """Number of speaker entries in a session log body."""
     return len(SESSION_ENTRY_RE.findall(text))

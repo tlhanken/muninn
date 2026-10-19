@@ -592,7 +592,7 @@ class MuninnMemoryProvider(MemoryProvider):
         """Lightweight session logging — append a timestamped entry to Episodic/sessions/.
 
         On first call per session, creates a session file with frontmatter.
-        On subsequent calls, appends a truncated entry. No LLM processing.
+        On subsequent calls, appends the turn in full. No LLM processing.
         If Episodic/ is not in wiki_dirs, skips silently.
         """
         try:
@@ -605,7 +605,7 @@ class MuninnMemoryProvider(MemoryProvider):
 
         Writes full user and assistant content (no truncation).
         Each turn produces two entries: one for User, one for Assistant.
-        Caps at 200 entries per file (~100 turns) — oldest 25 stripped when exceeded.
+        Entries are only ever appended; none is removed, whatever the log's length.
         Tags each session file with the agent profile name.
         """
         # Find Episodic/ in wiki_dirs
@@ -639,44 +639,12 @@ class MuninnMemoryProvider(MemoryProvider):
             )
             return
 
-        # Existing file — read current content, check cap, append
+        # Existing file: append. Entries are never removed and the file is never
+        # rewritten here, so a failed write cannot lose what is already logged.
         try:
-            with open(session_path, "r", encoding="utf-8") as f:
-                current_content = f.read()
-
-            # Separate frontmatter from body
-            if current_content.startswith("---"):
-                _, fm, body = current_content.split("---", 2)
-                frontmatter_block = f"---{fm}---"
-            else:
-                frontmatter_block = ""
-                body = current_content
-
-            # Count entries by timestamp-patterned ### headers only
-            # Using regex to match ### <ISO-date> — this prevents markdown
-            # ### headers inside messages from being counted as entries.
-            entry_matches = list(_parser_mod.SESSION_ENTRY_RE.finditer(body))
-            max_entries = 200
-
-            if len(entry_matches) >= max_entries:
-                # Strip oldest 25 entries (find the 26th-oldest boundary)
-                strip_index = entry_matches[24].start() if len(entry_matches) > 24 else 0
-                body = body[strip_index:]
-
-            # Append new entries
-            new_body = body.rstrip() + "\n\n" + entries
-
-            if frontmatter_block:
-                full_content = frontmatter_block + "\n" + new_body
-            else:
-                full_content = new_body
-
-            with open(session_path, "w", encoding="utf-8") as f:
-                f.write(full_content)
+            _parser_mod.append_session_turn(session_path, entries)
         except Exception as e:
             logger.warning("QMD Wiki: failed to append session turn: %s", e)
-            # Fallback: use append_to_wiki_file
-            append_to_wiki_file(session_path, entries)
 
     # -- Session end hook ----------------------------------------------------
 
