@@ -139,10 +139,25 @@ def test_config_schema_covers_the_documented_keys():
 
 
 def test_wiki_env_var_makes_the_provider_available(tmp_path, monkeypatch):
-    """The documented QMD_WIKI_DIR path, exercised rather than assumed."""
+    """The documented QMD_WIKI_DIR path, exercised rather than assumed.
+
+    The provider resolves its wiki directories when it is constructed, so the environment
+    has to be in place *before* loading. Setting it afterwards leaves the provider reading
+    whatever it found first — on a development machine, the real vault — which makes an
+    empty directory look available. HERMES_HOME is redirected too, so a configured
+    ~/.hermes/qmd-wiki.json (which takes precedence over the env var) cannot leak in, and
+    the real vault is never indexed by a test.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("QMD_WIKI_DIR", str(tmp_path / "wiki"))
+    (tmp_path / "wiki").mkdir()
+
     provider = _loaded_provider()
-    monkeypatch.setenv("QMD_WIKI_DIR", str(tmp_path))
+    # __init__ leaves the directories empty and initialize() is what loads them — but
+    # initialize() also scans the directories and builds search collections, side effects a
+    # config test has no business triggering. Call the loader's own config step instead.
+    provider._load_config()
     assert provider.is_available() is False, "an empty directory is not an available wiki"
 
-    (tmp_path / "note.md").write_text("# Note\n")
+    (tmp_path / "wiki" / "note.md").write_text("# Note\n")
     assert provider.is_available() is True, "a directory holding a .md page is an available wiki"
