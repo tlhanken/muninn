@@ -1,5 +1,5 @@
 name: muninn
 description: "Memory provider backed by .qmd/.md wiki files. Multi-directory indexing with OKF-aware search, wikilink extraction, write support (wiki_write, wiki_append), session logging via sync_turn, and executable code cells for living knowledge verification."
 version: 0.1.0
-author: Hermes Agent
+author: Trevor Hanken
 license: MIT

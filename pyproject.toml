@@ -7,12 +7,16 @@ name = "muninn"
 version = "0.1.0"
 description = "Hermes memory provider backed by .qmd/.md wiki files: OKF-aware search, wikilink extraction, write/append tools, session logging, and executable code cells for living knowledge verification."
 readme = "README.md"
+authors = [{ name = "Trevor Hanken" }]
 # The provider is imported into Hermes' own environment, so it has to install under
 # whatever interpreter Hermes runs. No upper bound: Hermes has run on 3.12 and is
 # now running 3.14 (pinned venv reports 3.14.7), and a stale ceiling would block the
 # newer one for no gain — the code is plain 3.11+ Python.
 requires-python = ">=3.11"
-license = { text = "MIT" }
+# PEP 639: an SPDX expression plus the file it lives in, rather than the deprecated
+# `license = { text = "MIT" }` table, which newer build frontends warn about.
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["pyyaml>=6"]
 
 [project.entry-points."hermes_agent.memory_providers"]
@@ -25,6 +29,10 @@ muninn = "muninn"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/muninn"]
+
+[project.urls]
+Repository = "https://github.com/tlhanken/muninn"
+Issues = "https://github.com/tlhanken/muninn/issues"
 
 [dependency-groups]
 dev = ["pytest>=8"]

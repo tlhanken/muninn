@@ -107,10 +107,10 @@ to turn on code-cell execution.
 ```
 src/muninn/__init__.py   the provider: tools, config, indexing, session logging
 src/muninn/parser.py     frontmatter, wikilinks, slugs, code cells
+src/muninn/plugin.yaml   plugin metadata — inside the package, so the wheel ships it
 tests/                   parser contract (Tier 1) and Hermes-coupled tests (Tier 2)
 openspec/                living specs and change proposals
 flake.nix                the package and the development shell
-plugin.yaml              plugin metadata
 ```
 
 `parser.py` is loaded by path from `__init__.py`, which is why the two files must stay
