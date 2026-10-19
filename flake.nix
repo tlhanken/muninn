@@ -101,6 +101,14 @@
 
           shellHook = ''
             ${hermes.passthru.devShellHook}
+            # The editable install resolves every Hermes module through
+            # $HERMES_PYTHON_SRC_ROOT: see __editable___hermes_agent_*_finder.py, whose
+            # mapping is all expandvars('$HERMES_PYTHON_SRC_ROOT/<name>'). The dev shell
+            # hook does not set it, so the placeholders stay literal, every mapping
+            # misses, and `import agent` fails — which is how the first Tier 2 run failed
+            # while looking like a missing dependency. hermes-agent.outPath is the source
+            # the editable env was built from.
+            export HERMES_PYTHON_SRC_ROOT="${hermes-agent.outPath}"
             # Derive the version directory. A hardcoded lib/python3.12/site-packages
             # points at nothing, and entry-point discovery then silently returns empty.
             export PYTHONPATH="${muninn}/${python.sitePackages}''${PYTHONPATH:+:$PYTHONPATH}"
