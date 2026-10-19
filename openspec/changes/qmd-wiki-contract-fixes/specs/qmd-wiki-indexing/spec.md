@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Frontmatter generation is escaping-safe
 `generate_frontmatter` (and any writer) SHALL emit `title` and `tags` in a form that

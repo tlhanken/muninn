@@ -1,0 +1,14 @@
+# OpenSpec project configuration. Without this file `openspec doctor` reports the
+# OpenSpec root as unhealthy.
+#
+# `schema` is the only required key: the workflow this repo's specs and changes follow.
+# Each change also carries its own .openspec.yaml naming the same schema.
+schema: spec-driven
+
+# Injected into every artifact instruction, so spec work starts from the same premise.
+context: >
+  Muninn is a Hermes Agent memory provider distributed as a Python package with an
+  entry point, not as a directory plugin. It indexes .qmd/.md wiki files through the
+  QMD CLI. The living spec is openspec/specs/qmd-wiki-memory-provider; provider
+  identity (the entry-point name, the provider's `name`, plugin.yaml, and
+  `memory.provider`) must always agree.
