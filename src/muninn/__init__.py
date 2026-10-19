@@ -448,8 +448,8 @@ class MuninnMemoryProvider(MemoryProvider):
         self._collections_initialized = True
 
         # Exclude session logs from default QMD search
-        # They're still indexed but won't appear in unscoped wiki_search queries.
-        # The dreaming cron and explicit -c sessions queries still work.
+        # They're still indexed but won't appear in unscoped wiki_search queries;
+        # explicit -c sessions queries still reach them.
         for wiki_dir in dirs:
             sessions_dir = os.path.join(wiki_dir, "sessions")
             if os.path.isdir(sessions_dir) and os.path.basename(wiki_dir) == "Episodic":
