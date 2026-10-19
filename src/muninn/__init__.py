@@ -84,12 +84,11 @@ _CONFIDENCE_WEIGHTS = {
     "low": 0.7,
 }
 
-# Known OKF page types for schema validation on write
-_OKF_TYPES = {
-    "concept", "entity", "comparison", "query", "summary",
-    "decision", "episodic", "procedural", "executive",
-    "identity", "user", "dream-candidate", "note",
-}
+# Page types accepted by wiki_write. Defined once, in parser.py (PAGE_TYPES), and
+# documented in openspec/specs/memory-interfaces — never redefine the set here.
+_OKF_TYPES = frozenset(_parser_mod.PAGE_TYPES)
+_CONFIDENCE_LEVELS = _parser_mod.CONFIDENCE_LEVELS
+_DEFAULT_CONFIDENCE = _parser_mod.DEFAULT_CONFIDENCE
 
 # Tool schemas
 WIKI_SEARCH_SCHEMA = {
@@ -187,7 +186,9 @@ WIKI_WRITE_SCHEMA = {
             },
             "type": {
                 "type": "string",
-                "description": "OKF page type (e.g., 'concept', 'entity', 'decision', 'episodic').",
+                "description": (
+                    "OKF page type, one of: " + ", ".join(_parser_mod.PAGE_TYPES) + "."
+                ),
             },
             "confidence": {
                 "type": "string",
@@ -448,8 +449,8 @@ class MuninnMemoryProvider(MemoryProvider):
         self._collections_initialized = True
 
         # Exclude session logs from default QMD search
-        # They're still indexed but won't appear in unscoped wiki_search queries.
-        # The dreaming cron and explicit -c sessions queries still work.
+        # They're still indexed but won't appear in unscoped wiki_search queries;
+        # explicit -c sessions queries still reach them.
         for wiki_dir in dirs:
             sessions_dir = os.path.join(wiki_dir, "sessions")
             if os.path.isdir(sessions_dir) and os.path.basename(wiki_dir) == "Episodic":
@@ -591,7 +592,7 @@ class MuninnMemoryProvider(MemoryProvider):
         """Lightweight session logging — append a timestamped entry to Episodic/sessions/.
 
         On first call per session, creates a session file with frontmatter.
-        On subsequent calls, appends a truncated entry. No LLM processing.
+        On subsequent calls, appends the turn in full. No LLM processing.
         If Episodic/ is not in wiki_dirs, skips silently.
         """
         try:
@@ -604,7 +605,7 @@ class MuninnMemoryProvider(MemoryProvider):
 
         Writes full user and assistant content (no truncation).
         Each turn produces two entries: one for User, one for Assistant.
-        Caps at 200 entries per file (~100 turns) — oldest 25 stripped when exceeded.
+        Entries are only ever appended; none is removed, whatever the log's length.
         Tags each session file with the agent profile name.
         """
         # Find Episodic/ in wiki_dirs
@@ -617,93 +618,33 @@ class MuninnMemoryProvider(MemoryProvider):
         if not episodic_dir:
             return  # Episodic/ not configured — skip silently
 
-        sessions_dir = os.path.join(episodic_dir, "sessions")
+        sessions_dir = os.path.join(episodic_dir, _parser_mod.SESSION_LOG_DIR)
         os.makedirs(sessions_dir, exist_ok=True)
 
-        # Generate session slug
         now = datetime.now(timezone.utc)
-        if session_id:
-            sid_hash = hashlib.sha256(session_id.encode()).hexdigest()[:8]
-            session_slug = f"session-{now.strftime('%Y-%m-%d')}-{sid_hash}"
-        else:
-            session_slug = f"session-{now.strftime('%Y-%m-%d-%H%M')}"
-
-        session_path = os.path.join(sessions_dir, f"{session_slug}.md")
-        timestamp = now.strftime("%Y-%m-%d %H:%M UTC")
+        session_path = os.path.join(
+            sessions_dir, f"{_parser_mod.session_slug(now, session_id)}.md"
+        )
 
         # Track session path for on_session_end hook
         if self._current_session_path is None:
             self._current_session_path = session_path
 
-        # Detect agent profile name from hermes_home path
-        agent_name = self._detect_profile_name()
-
-        # Format as two separate ### entries (Option 2: one per speaker)
-        # Break triple backticks to avoid nesting in markdown
-        user_clean = user_content.replace("```", "`\u200b`\u200b`")
-        asst_clean = assistant_content.replace("```", "`\u200b`\u200b`")
-        entries = (
-            f"### {timestamp} | User\n\n{user_clean}\n\n"
-            f"### {timestamp} | Assistant\n\n{asst_clean}\n\n"
-        )
+        # One entry per speaker, full content; the format is defined in parser.py.
+        entries = _parser_mod.format_session_turn(now, user_content, assistant_content)
 
         if not os.path.exists(session_path):
-            # Create new session file (first turn) with agent metadata
-            tags = ["session", "log", f"agent:{agent_name}"]
-            write_wiki_file(
-                path=session_path,
-                title=f"Session {now.strftime('%Y-%m-%d')}",
-                content=entries,
-                tags=tags,
-                page_type="episodic",
-                confidence="medium",
+            _parser_mod.create_session_log(
+                session_path, now, self._detect_profile_name(), entries
             )
-            # Inject agent field into frontmatter
-            try:
-                self._inject_frontmatter_field(session_path, "agent", agent_name)
-            except Exception:
-                pass  # non-fatal
             return
 
-        # Existing file — read current content, check cap, append
+        # Existing file: append. Entries are never removed and the file is never
+        # rewritten here, so a failed write cannot lose what is already logged.
         try:
-            with open(session_path, "r", encoding="utf-8") as f:
-                current_content = f.read()
-
-            # Separate frontmatter from body
-            if current_content.startswith("---"):
-                _, fm, body = current_content.split("---", 2)
-                frontmatter_block = f"---{fm}---"
-            else:
-                frontmatter_block = ""
-                body = current_content
-
-            # Count entries by timestamp-patterned ### headers only
-            # Using regex to match ### <ISO-date> — this prevents markdown
-            # ### headers inside messages from being counted as entries.
-            entry_boundary = re.compile(r'^### \d{4}-\d{2}-\d{2}', re.MULTILINE)
-            entry_matches = list(entry_boundary.finditer(body))
-            max_entries = 200
-
-            if len(entry_matches) >= max_entries:
-                # Strip oldest 25 entries (find the 26th-oldest boundary)
-                strip_index = entry_matches[24].start() if len(entry_matches) > 24 else 0
-                body = body[strip_index:]
-
-            # Append new entries
-            new_body = body.rstrip() + "\n\n" + entries
-
-            if frontmatter_block:
-                full_content = frontmatter_block + "\n" + new_body
-            else:
-                full_content = new_body
-
-            with open(session_path, "w", encoding="utf-8") as f:
-                f.write(full_content)
+            _parser_mod.append_session_turn(session_path, entries)
         except Exception as e:
             logger.warning("QMD Wiki: failed to append session turn: %s", e)
-            # Fallback: use append_to_wiki_file
-            append_to_wiki_file(session_path, entries)
 
     # -- Session end hook ----------------------------------------------------
 
@@ -971,7 +912,7 @@ class MuninnMemoryProvider(MemoryProvider):
         # Apply OKF filtering (type, confidence, status) as post-processing
         filtered = []
         for page in matched:
-            if page.status in ("superseded", "rejected"):
+            if page.status in _parser_mod.SEARCH_EXCLUDED_STATUSES:
                 continue
             if page_type and page.page_type != page_type:
                 continue
@@ -980,7 +921,7 @@ class MuninnMemoryProvider(MemoryProvider):
         # True tiebreaker: QMD relevance (score, rounded) is primary; confidence
         # only breaks near-ties. High-confidence does NOT outrank a more relevant
         # medium/low page. Stable sort keeps QMD's order within equal keys.
-        confidence_order = {"high": 0, "medium": 1, "low": 2}
+        confidence_order = {lvl: i for i, lvl in enumerate(_CONFIDENCE_LEVELS)}
 
         def _sort_key(page: WikiPage):
             score = match_scores.get(os.path.abspath(page.path), 0.0)
@@ -1127,8 +1068,8 @@ class MuninnMemoryProvider(MemoryProvider):
         tags = args.get("tags", [])
         page_type = args.get("type")
         confidence = args.get("confidence")
-        if confidence is not None and confidence not in ("high", "medium", "low"):
-            confidence = "medium"
+        if confidence is not None and confidence not in _CONFIDENCE_LEVELS:
+            confidence = _DEFAULT_CONFIDENCE
         directory = args.get("directory")
 
         # Schema validation: page_type must be a known OKF type.
@@ -1168,12 +1109,12 @@ class MuninnMemoryProvider(MemoryProvider):
                 if page_type is None:
                     page_type = existing_meta.get("type")
                 if confidence is None:
-                    confidence = existing_meta.get("confidence", "medium")
-                    if confidence not in ("high", "medium", "low"):
-                        confidence = "medium"
+                    confidence = existing_meta.get("confidence", _DEFAULT_CONFIDENCE)
+                    if confidence not in _CONFIDENCE_LEVELS:
+                        confidence = _DEFAULT_CONFIDENCE
 
         if confidence is None:
-            confidence = "medium"
+            confidence = _DEFAULT_CONFIDENCE
 
         # Write the file
         result = write_wiki_file(

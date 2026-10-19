@@ -55,10 +55,9 @@ global `index.sqlite` collections are cleaned up.
 
 `_handle_wiki_write` gains validation before writing:
 
-- `type` must be in the known OKF set
-  (`concept, entity, comparison, query, summary, decision, episodic, procedural,
-   executive, identity, user, dream-candidate, ...`).
-- `confidence` must be `high|medium|low`.
+- `type` must be in the page-type set defined by the `memory-interfaces` spec
+  (`PAGE_TYPES` in `parser.py`); this design does not restate it.
+- `confidence` must be one of the spec's confidence levels.
 - `directory` must resolve to one of the profile's `wiki_dirs` (allowlist check,
   already partially present via traversal guard — strengthened to explicit
   membership).

@@ -1,5 +1,11 @@
 # Dreaming Pipeline
 
+> **DEFERRED — archived unapplied** by `descope-dreaming`
+> (`openspec/changes/archive/2026-10-18-descope-dreaming/`). Offline consolidation is
+> being redesigned from first principles for the next Muninn, which replaces the formats
+> this pipeline was built on. None of this change's requirements were applied to the
+> living specs; it is kept here as design input for that redesign.
+
 ## Why
 
 The QMD wiki plugin captures and indexes knowledge, but has no mechanism for

@@ -4,7 +4,7 @@
 # uv-managed interpreter. --python-preference only-system is required on NixOS:
 # uv's downloaded interpreters are glibc-linked and the kernel refuses to exec them.
 test-parser:
-    uv run --no-project --python-preference only-system --with pytest --with pyyaml python -m pytest tests/test_parser_contract.py -q
+    uv run --no-project --python-preference only-system --with pytest --with pyyaml python -m pytest tests/test_parser_contract.py tests/test_memory_interfaces_contract.py -q
 
 # Tier 2: the Hermes-facing contract — discovery, provider identity, the tool surface.
 # It has to run under the interpreter Hermes actually uses, never a bare `python`, or a
@@ -20,6 +20,11 @@ test: test-parser
 # The exact package nixos-config consumes.
 build:
     nix build .#default
+
+# The memory-interfaces contract as a markdown table, generated from parser.py, for the
+# vault's SCHEMA.md. The spec, not this output, is authoritative.
+schema-doc:
+    uv run --no-project --python-preference only-system python scripts/schema_doc.py
 
 # The OpenSpec corpus: living specs and open changes.
 validate-specs:
